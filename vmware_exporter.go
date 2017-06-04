@@ -31,6 +31,7 @@ import (
 	"github.com/serenize/snaker"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
@@ -120,7 +121,16 @@ func NewExporter(config *Config) *Exporter {
 
 var countersInfoMap = make(map[int]*prometheus.Desc)
 
+var metricInfoMap = make(map[string]*prometheus.Desc)
+
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
+	datastoreMetrics := []string{"capacity", "freespace"}
+	for _, metric := range datastoreMetrics {
+		desc := prometheus.NewDesc(fmt.Sprintf("vsphere_datastore_%s", metric), fmt.Sprintf("Datastore %s", metric), []string{"datastore"}, nil)
+		metricInfoMap[fmt.Sprintf("datastore%s", metric)] = desc
+		ch <- desc
+	}
+
 	for _, perfCounterInfo := range e.performanceManager.PerfCounter {
 		groupInfo := perfCounterInfo.GroupInfo.GetElementDescription()
 		nameInfo := perfCounterInfo.NameInfo.GetElementDescription()
@@ -134,6 +144,34 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+	dss, err := e.finder.DatastoreList(e.ctx, "*")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	pc := property.DefaultCollector(e.client.Client)
+
+	// Convert datastores into list of references
+	var refs []types.ManagedObjectReference
+	for _, ds := range dss {
+		refs = append(refs, ds.Reference())
+	}
+
+	// Retrieve summary property for all datastores
+	var dst []mo.Datastore
+	err = pc.Retrieve(e.ctx, refs, []string{"summary"}, &dst)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, ds := range dst {
+		ch <- prometheus.MustNewConstMetric(metricInfoMap["datastorecapacity"],
+			prometheus.GaugeValue, float64(ds.Summary.Capacity), ds.Summary.Name)
+		ch <- prometheus.MustNewConstMetric(metricInfoMap["datastorefreespace"],
+			prometheus.GaugeValue, float64(ds.Summary.FreeSpace), ds.Summary.Name)
+
+	}
+
 	hosts, err := e.finder.HostSystemList(e.ctx, "*")
 	if err != nil {
 		log.Fatal(err)
